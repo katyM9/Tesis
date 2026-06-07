@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Detector de Distancia Rostro-Pantalla</title>
+
+  <!-- 
+    ============================================================
+    LIBRERÍAS USADAS:
+    1. @mediapipe/face_mesh  → detecta 468 puntos del rostro en tiempo real
+    2. @mediapipe/camera_utils → maneja el stream de la cámara del celular
+    3. @mediapipe/drawing_utils → dibuja los landmarks sobre el canvas
+    ============================================================
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js" crossorigin="anonymous"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --verde:   #22c55e;
+      --amarillo:#f59e0b;
+      --rojo:    #ef4444;
+      --fondo:   #0f172a;
+      --texto:   #f1f5f9;
+      --gris:    #1e293b;
+      --borde:   #334155;
+    }
+
+    body {
+      background: var(--fondo);
+      color: var(--texto);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    header {
+      width: 100%;
+      padding: 14px 16px 10px;
+      background: var(--gris);
+      border-bottom: 1px solid var(--borde);
+      text-align: center;
+    }
+    header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      color: var(--texto);
+    }
+    header p {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-top: 2px;
+    }
+
+    /* ---------- Panel de video + canvas ---------- */
+    #viewport {
+      position: relative;
+      width: 100%;
+      max-width: 480px;
+      background: #000;
+    }
+
+    #inputVideo {
+      width: 100%;
+      display: block;
+      transform: scaleX(-1); /* espejo para selfie */
+    }
+
+    #outputCanvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      transform: scaleX(-1); /* espejo igual que el video */
+    }
+
+    /* Overlay de zona de riesgo */
+    #zoneOverlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      border: 4px solid transparent;
+      transition: border-color 0.3s, background 0.3s;
+    }
+    #zoneOverlay.riesgo-alto   { border-color: var(--rojo);    background: rgba(239,68,68,0.12); }
+    #zoneOverlay.riesgo-medio  { border-color: var(--amarillo); background: rgba(245,158,11,0.10); }
+    #zoneOverlay.riesgo-bajo   { border-color: var(--verde);   background: rgba(34,197,94,0.05); }
+
+    /* Distancia centrada sobre el video */
+    #distanciaLabel {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 28px;
+      font-weight: 700;
+      text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+      transition: color 0.3s;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    /* Mensaje de alerta centrado */
+    #alertaLabel {
+      position: absolute;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 13px;
+      font-weight: 600;
+      padding: 5px 14px;
+      border-radius: 20px;
+      background: rgba(0,0,0,0.65);
+      backdrop-filter: blur(4px);
+      white-space: nowrap;
+      pointer-events: none;
+      transition: all 0.3s;
+    }
+
+    /* ---------- Panel de métricas ---------- */
+    #metricas {
+      width: 100%;
+      max-width: 480px;
+      padding: 14px 16px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+    }
+
+    .metrica-card {
+      background: var(--gris);
+      border: 1px solid var(--borde);
+      border-radius: 10px;
+      padding: 10px 8px;
+      text-align: center;
+    }
+    .metrica-card .valor {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .metrica-card .etiqueta {
+      font-size: 10px;
+      color: #64748b;
+      margin-top: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    /* Barra de distancia visual */
+    #barraContainer {
+      width: 100%;
+      max-width: 480px;
+      padding: 0 16px 14px;
+    }
+    #barraContainer .titulo-barra {
+      font-size: 11px;
+      color: #64748b;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    #barraPista {
+      width: 100%;
+      height: 10px;
+      background: var(--gris);
+      border-radius: 5px;
+      position: relative;
+      overflow: hidden;
+    }
+    #barraRelleno {
+      height: 100%;
+      border-radius: 5px;
+      width: 0%;
+      transition: width 0.2s, background 0.3s;
+    }
+    /* Marcadores de zona */
+    #marcadores {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 4px;
+    }
+    #marcadores span { font-size: 10px; color: #64748b; }
+
+    /* ---------- Panel de configuración ---------- */
+    #config {
+      width: 100%;
+      max-width: 480px;
+      padding: 0 16px 16px;
+    }
+    #config h3 {
+      font-size: 12px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 10px;
+    }
+
+    .config-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      background: var(--gris);
+      border: 1px solid var(--borde);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .config-row label {
+      font-size: 13px;
+      color: var(--texto);
+    }
+    .config-row .hint {
+      font-size: 10px;
+      color: #64748b;
+      margin-top: 2px;
+    }
+    .config-row input[type="range"] {
+      width: 110px;
+      accent-color: #6366f1;
+    }
+    .config-row .val-display {
+      font-size: 13px;
+      font-weight: 600;
+      color: #818cf8;
+      min-width: 38px;
+      text-align: right;
+    }
+
+    /* Botón calibrar */
+    #btnCalibrar {
+      width: 100%;
+      padding: 12px;
+      background: #4f46e5;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 4px;
+      transition: background 0.2s;
+    }
+    #btnCalibrar:hover { background: #4338ca; }
+    #btnCalibrar:active { background: #3730a3; }
+
+    #estadoCalibracion {
+      font-size: 11px;
+      color: #64748b;
+      text-align: center;
+      margin-top: 6px;
+    }
+
+    /* ---------- Log de eventos ---------- */
+    #logContainer {
+      width: 100%;
+      max-width: 480px;
+      padding: 0 16px 20px;
+    }
+    #logContainer h3 {
+      font-size: 12px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+    #logBox {
+      background: var(--gris);
+      border: 1px solid var(--borde);
+      border-radius: 8px;
+      padding: 10px 12px;
+      max-height: 140px;
+      overflow-y: auto;
+      font-size: 11px;
+      font-family: monospace;
+      color: #94a3b8;
+    }
+    #logBox .entry { margin-bottom: 3px; }
+    #logBox .ts { color: #475569; margin-right: 6px; }
+    #logBox .rojo-txt { color: #f87171; }
+    #logBox .amarillo-txt { color: #fbbf24; }
+    #logBox .verde-txt { color: #4ade80; }
+
+    /* Pantalla de carga */
+    #loadingScreen {
+      position: fixed;
+      inset: 0;
+      background: var(--fondo);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      gap: 16px;
+    }
+    #loadingScreen p { color: #94a3b8; font-size: 14px; }
+    .spinner {
+      width: 44px; height: 44px;
+      border: 4px solid var(--borde);
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Ocultar video original de MediaPipe (lo maneja la lib internamente) */
+    .input_video { display: none; }
+  </style>
+</head>
+<body>
+
+<!-- Pantalla de carga mientras MediaPipe descarga el modelo -->
+<div id="loadingScreen">
+  <div class="spinner"></div>
+  <p>Cargando modelo de detección facial...</p>
+  <p style="font-size:11px; color:#475569;">Requiere conexión para el primer uso</p>
+</div>
+
+<header>
+  <h1>🎯 Detector Postural Visual</h1>
+  <p>Mide la distancia entre tu rostro y la pantalla en tiempo real</p>
+</header>
+
+<!-- ====== VIEWPORT: VIDEO + CANVAS SUPERPUESTO ====== -->
+<div id="viewport">
+  <!-- Video de la cámara frontal (oculto, MediaPipe lo usa internamente) -->
+  <video id="inputVideo" class="input_video" autoplay muted playsinline></video>
+
+  <!-- Canvas donde se dibuja el resultado de MediaPipe -->
+  <canvas id="outputCanvas"></canvas>
+
+  <!-- Overlay de color según zona de riesgo -->
+  <div id="zoneOverlay"></div>
+
+  <!-- Etiqueta de distancia sobre el video -->
+  <div id="distanciaLabel">--</div>
+
+  <!-- Mensaje de alerta contextual -->
+  <div id="alertaLabel">Iniciando cámara...</div>
+</div>
+
+<!-- ====== MÉTRICAS ====== -->
+<div id="metricas">
+  <div class="metrica-card">
+    <div class="valor" id="valDistancia" style="color: #94a3b8">--</div>
+    <div class="etiqueta">Distancia (cm)</div>
+  </div>
+  <div class="metrica-card">
+    <div class="valor" id="valAnchoPx" style="color: #94a3b8">--</div>
+    <div class="etiqueta">Ancho facial (px)</div>
+  </div>
+  <div class="metrica-card">
+    <div class="valor" id="valFPS" style="color: #94a3b8">--</div>
+    <div class="etiqueta">FPS</div>
+  </div>
+</div>
+
+<!-- ====== BARRA DE DISTANCIA ====== -->
+<div id="barraContainer">
+  <div class="titulo-barra">Rango de distancia (0–100 cm)</div>
+  <div id="barraPista">
+    <div id="barraRelleno"></div>
+  </div>
+  <div id="marcadores">
+    <span>0</span>
+    <span style="color: #f87171">🔴 &lt;25 Peligro</span>
+    <span style="color: #fbbf24">🟡 25–40 Cuidado</span>
+    <span style="color: #4ade80">🟢 &gt;40 OK</span>
+    <span>100+</span>
+  </div>
+</div>
+
+<!-- ====== CONFIGURACIÓN ====== -->
+<div id="config">
+  <h3>⚙️ Configuración</h3>
+
+  <!-- Umbral de alerta roja -->
+  <div class="config-row">
+    <div>
+      <label>Umbral crítico</label>
+      <div class="hint">Distancia mínima antes de alerta roja</div>
+    </div>
+    <input type="range" id="sliderRojo" min="10" max="40" value="25"
+           oninput="umbralRojo=+this.value; document.getElementById('valRojo').textContent=this.value+'cm'">
+    <span class="val-display" id="valRojo">25cm</span>
+  </div>
+
+  <!-- Umbral de alerta amarilla -->
+  <div class="config-row">
+    <div>
+      <label>Umbral precaución</label>
+      <div class="hint">Distancia mínima antes de alerta amarilla</div>
+    </div>
+    <input type="range" id="sliderAmarillo" min="25" max="60" value="40"
+           oninput="umbralAmarillo=+this.value; document.getElementById('valAmarillo').textContent=this.value+'cm'">
+    <span class="val-display" id="valAmarillo">40cm</span>
+  </div>
+
+  <!-- Ancho real del rostro (calibración) -->
+  <div class="config-row">
+    <div>
+      <label>Ancho real del rostro</label>
+      <div class="hint">Promedio: 14.5 cm adulto / 12.5 cm niño</div>
+    </div>
+    <input type="range" id="sliderAncho" min="10" max="18" step="0.5" value="13.5"
+           oninput="ANCHO_REAL_CM=+this.value; document.getElementById('valAncho').textContent=this.value+'cm'">
+    <span class="val-display" id="valAncho">13.5cm</span>
+  </div>
+
+  <!-- Botón de calibración -->
+  <button id="btnCalibrar" onclick="iniciarCalibracion()">
+    📏 Calibrar a distancia conocida (30 cm)
+  </button>
+  <div id="estadoCalibracion">
+    Focal length actual: <span id="valFocal">--</span> px
+  </div>
+</div>
+
+<!-- ====== LOG DE EVENTOS ====== -->
+<div id="logContainer">
+  <h3>📋 Registro de eventos</h3>
+  <div id="logBox">
+    <div class="entry"><span class="ts">00:00</span>Sistema iniciado</div>
+  </div>
+</div>
+
+<!-- ====== VIDEO INTERNO DE MEDIAPIPE (oculto) ====== -->
+<video class="input_video" id="mpVideo" style="display:none"></video>
+
+<script>
+// ============================================================
+// CONSTANTES Y ESTADO GLOBAL
+// ============================================================
+
+// Landmarks de MediaPipe Face Mesh que marcan los extremos del rostro
+// 234 = extremo izquierdo del rostro  |  454 = extremo derecho del rostro
+// Ver mapa completo: https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
+const LANDMARK_IZQUIERDO = 234;
+const LANDMARK_DERECHO    = 454;
+
+// Ancho real promedio del rostro en cm (ajustable por el usuario)
+// Adulto: ~14.5 cm | Niño 8-12 años: ~12.5-13.5 cm
+let ANCHO_REAL_CM = 13.5;
+
+// Focal length estimada de la cámara (en píxeles).
+// Se calibra con la función iniciarCalibracion()
+// Valor por defecto estimado para cámaras de celular típicas (~6mm focal, sensor 1/3")
+let FOCAL_LENGTH_PX = 600;
+
+// Umbrales de distancia en cm
+let umbralRojo    = 25;  // < 25cm → PELIGRO (zona roja)
+let umbralAmarillo= 40;  // < 40cm → CUIDADO (zona amarilla)
+                          // >= 40cm → OK     (zona verde)
+
+// Estado del sistema
+let calibrando       = false;
+let muestrasCalib    = [];
+let ultimaDistancia  = 0;
+let contFrames       = 0;
+let tiempoFPS        = Date.now();
+let logBuffer        = [];
+
+// ============================================================
+// REFERENCIAS AL DOM
+// ============================================================
+const videoEl       = document.getElementById('inputVideo');
+const canvasEl      = document.getElementById('outputCanvas');
+const ctx           = canvasEl.getContext('2d');
+const zoneOverlay   = document.getElementById('zoneOverlay');
+const distanciaLbl  = document.getElementById('distanciaLabel');
+const alertaLbl     = document.getElementById('alertaLabel');
+const valDistancia  = document.getElementById('valDistancia');
+const valAnchoPx    = document.getElementById('valAnchoPx');
+const valFPS        = document.getElementById('valFPS');
+const barraRelleno  = document.getElementById('barraRelleno');
+const logBox        = document.getElementById('logBox');
+const valFocal      = document.getElementById('valFocal');
+const loadingScreen = document.getElementById('loadingScreen');
+
+// ============================================================
+// FUNCIÓN PRINCIPAL: calcula distancia a partir de landmarks
+// ============================================================
+function calcularDistancia(landmarks, canvasW, canvasH) {
+  /*
+   * PRINCIPIO MATEMÁTICO (Similar Triangles / Pinhole Camera Model)
+   * ---------------------------------------------------------------
+   * Si conocemos:
+   *   - W_real = ancho real del objeto (en cm) 
+   *   - W_px   = ancho del objeto en la imagen (en píxeles)
+   *   - f      = distancia focal de la cámara (en píxeles)
+   *
+   * Entonces la distancia D al objeto es:
+   *
+   *   D = (W_real × f) / W_px
+   *
+   * La focal_length en píxeles se obtiene al calibrar:
+   *   f = (W_px_a_distancia_conocida × distancia_conocida) / W_real
+   */
+
+  const puntoIzq = landmarks[LANDMARK_IZQUIERDO];
+  const puntoDer = landmarks[LANDMARK_DERECHO];
+
+  // Los landmarks de MediaPipe están normalizados (0.0 a 1.0)
+  // Los multiplicamos por el tamaño del canvas para obtener píxeles reales
+  const xIzq = puntoIzq.x * canvasW;
+  const xDer = puntoDer.x * canvasW;
+
+  const anchoPx = Math.abs(xDer - xIzq);
+
+  if (anchoPx < 10) return null; // Muy pequeño, dato inválido
+
+  const distanciaCm = (ANCHO_REAL_CM * FOCAL_LENGTH_PX) / anchoPx;
+
+  return { distanciaCm: Math.round(distanciaCm), anchoPx: Math.round(anchoPx) };
+}
+
+// ============================================================
+// ACTUALIZAR UI SEGÚN DISTANCIA
+// ============================================================
+function actualizarUI(distanciaCm, anchoPx) {
+  // Actualizar métricas numéricas
+  valDistancia.textContent = distanciaCm;
+  valAnchoPx.textContent   = anchoPx;
+
+  // Actualizar etiqueta principal flotante
+  distanciaLbl.textContent = distanciaCm + ' cm';
+
+  // Calcular porcentaje para la barra (0–100cm = 0–100%)
+  const pct = Math.min(100, Math.max(0, distanciaCm));
+  barraRelleno.style.width = pct + '%';
+
+  let colorHex, zona, claseOverlay, mensajeAlerta;
+
+  if (distanciaCm < umbralRojo) {
+    colorHex     = '#ef4444';
+    zona         = '🔴 PELIGRO';
+    claseOverlay = 'riesgo-alto';
+    mensajeAlerta= '⚠️ Demasiado cerca — Aleja el dispositivo';
+
+    // Registrar evento solo si cambió de zona
+    if (ultimaDistancia >= umbralRojo) {
+      registrarLog(`Zona PELIGRO: ${distanciaCm}cm`, 'rojo-txt');
+      // Vibración (solo funciona en móviles con API disponible)
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    }
+
+  } else if (distanciaCm < umbralAmarillo) {
+    colorHex     = '#f59e0b';
+    zona         = '🟡 PRECAUCIÓN';
+    claseOverlay = 'riesgo-medio';
+    mensajeAlerta= '⚡ Posición sub-óptima — Ajusta la distancia';
+
+    if (ultimaDistancia < umbralRojo || ultimaDistancia >= umbralAmarillo) {
+      registrarLog(`Zona PRECAUCIÓN: ${distanciaCm}cm`, 'amarillo-txt');
+    }
+
+  } else {
+    colorHex     = '#22c55e';
+    zona         = '🟢 SEGURO';
+    claseOverlay = 'riesgo-bajo';
+    mensajeAlerta= '✓ Distancia segura';
+
+    if (ultimaDistancia < umbralAmarillo) {
+      registrarLog(`Zona SEGURA: ${distanciaCm}cm`, 'verde-txt');
+    }
+  }
+
+  // Aplicar colores
+  distanciaLbl.style.color = colorHex;
+  barraRelleno.style.background = colorHex;
+  valDistancia.style.color = colorHex;
+
+  // Actualizar overlay
+  zoneOverlay.className = claseOverlay;
+
+  // Actualizar alerta
+  alertaLbl.textContent = mensajeAlerta;
+
+  ultimaDistancia = distanciaCm;
+}
+
+// ============================================================
+// DIBUJAR LANDMARKS SOBRE EL CANVAS
+// ============================================================
+function dibujarResultados(results) {
+  // Limpiar canvas
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+
+  // Dibujar frame del video
+  ctx.drawImage(results.image, 0, 0, canvasEl.width, canvasEl.height);
+
+  if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+    alertaLbl.textContent = '👤 Coloca tu cara frente a la cámara';
+    distanciaLbl.textContent = '--';
+    valDistancia.textContent = '--';
+    valAnchoPx.textContent = '--';
+    zoneOverlay.className = '';
+    barraRelleno.style.width = '0%';
+    return;
+  }
+
+  // Procesar el primer rostro detectado
+  const landmarks = results.multiFaceLandmarks[0];
+
+  // Dibujar puntos clave del contorno facial (puntos menos, más legible)
+  // Solo dibujamos el ÓVALO FACIAL (puntos del contorno exterior)
+  const OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,
+                397,365,379,378,400,377,152,148,176,149,150,136,
+                172,58,132,93,234,127,162,21,54,103,67,109];
+
+  ctx.beginPath();
+  OVAL.forEach((idx, i) => {
+    const pt = landmarks[idx];
+    const x = pt.x * canvasEl.width;
+    const y = pt.y * canvasEl.height;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
+  ctx.strokeStyle = 'rgba(99,102,241,0.8)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Dibujar los dos puntos de referencia para el ancho
+  [LANDMARK_IZQUIERDO, LANDMARK_DERECHO].forEach(idx => {
+    const pt = landmarks[idx];
+    const x = pt.x * canvasEl.width;
+    const y = pt.y * canvasEl.height;
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, 2 * Math.PI);
+    ctx.fillStyle = '#f59e0b';
+    ctx.fill();
+  });
+
+  // Línea entre los dos puntos de medición
+  const ptL = landmarks[LANDMARK_IZQUIERDO];
+  const ptR = landmarks[LANDMARK_DERECHO];
+  ctx.beginPath();
+  ctx.moveTo(ptL.x * canvasEl.width, ptL.y * canvasEl.height);
+  ctx.lineTo(ptR.x * canvasEl.width, ptR.y * canvasEl.height);
+  ctx.strokeStyle = 'rgba(245,158,11,0.7)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Calcular y mostrar distancia
+  const resultado = calcularDistancia(landmarks, canvasEl.width, canvasEl.height);
+  if (resultado) {
+    actualizarUI(resultado.distanciaCm, resultado.anchoPx);
+
+    // Si estamos calibrando, guardar muestra
+    if (calibrando) {
+      muestrasCalib.push(resultado.anchoPx);
+    }
+  }
+
+  // Calcular FPS
+  contFrames++;
+  const ahora = Date.now();
+  if (ahora - tiempoFPS >= 1000) {
+    valFPS.textContent = contFrames;
+    contFrames = 0;
+    tiempoFPS = ahora;
+  }
+}
+
+// ============================================================
+// CALIBRACIÓN: medir a 30 cm conocidos
+// ============================================================
+function iniciarCalibracion() {
+  const DISTANCIA_CALIB_CM = 30; // El usuario debe estar a esta distancia
+
+  if (calibrando) {
+    // Finalizar calibración y promediar muestras
+    if (muestrasCalib.length > 5) {
+      const promedioPx = muestrasCalib.reduce((a,b)=>a+b,0) / muestrasCalib.length;
+      FOCAL_LENGTH_PX  = (promedioPx * DISTANCIA_CALIB_CM) / ANCHO_REAL_CM;
+      valFocal.textContent = Math.round(FOCAL_LENGTH_PX) + ' px';
+      registrarLog(`Calibración OK: f=${Math.round(FOCAL_LENGTH_PX)}px (${muestrasCalib.length} muestras)`, 'verde-txt');
+      document.getElementById('estadoCalibracion').textContent =
+        `✓ Calibrado: focal=${Math.round(FOCAL_LENGTH_PX)}px`;
+    } else {
+      registrarLog('Calibración fallida: pocas muestras', 'rojo-txt');
+    }
+    calibrando = false;
+    muestrasCalib = [];
+    document.getElementById('btnCalibrar').textContent = '📏 Calibrar a distancia conocida (30 cm)';
+    document.getElementById('btnCalibrar').style.background = '#4f46e5';
+  } else {
+    // Iniciar calibración
+    calibrando = true;
+    muestrasCalib = [];
+    document.getElementById('btnCalibrar').textContent = '⏹ Detener y guardar calibración';
+    document.getElementById('btnCalibrar').style.background = '#dc2626';
+    registrarLog(`Calibración iniciada (colócate a ${DISTANCIA_CALIB_CM}cm)`, 'amarillo-txt');
+    document.getElementById('estadoCalibracion').textContent =
+      `Calibrando... colócate a ${DISTANCIA_CALIB_CM}cm de la pantalla`;
+  }
+}
+
+// ============================================================
+// SISTEMA DE LOG
+// ============================================================
+function registrarLog(msg, clase = '') {
+  const ahora = new Date();
+  const ts = String(ahora.getMinutes()).padStart(2,'0') + ':' +
+             String(ahora.getSeconds()).padStart(2,'0');
+  const entrada = document.createElement('div');
+  entrada.className = 'entry';
+  entrada.innerHTML = `<span class="ts">${ts}</span><span class="${clase}">${msg}</span>`;
+  logBox.insertBefore(entrada, logBox.firstChild); // Más reciente arriba
+  // Mantener máximo 50 entradas
+  while (logBox.children.length > 50) logBox.removeChild(logBox.lastChild);
+}
+
+// ============================================================
+// INICIALIZAR MEDIAPIPE FACE MESH
+// ============================================================
+async function inicializar() {
+  // Crear la instancia de FaceMesh
+  const faceMesh = new FaceMesh({
+    locateFile: (file) => {
+      // Usar CDN de jsDelivr para los archivos del modelo
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`;
+    }
+  });
+
+  // Configurar opciones del modelo
+  faceMesh.setOptions({
+    maxNumFaces:       1,    // Solo detectar 1 rostro (más eficiente)
+    refineLandmarks:   true, // Mejor precisión en ojos y labios
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence:  0.5
+  });
+
+  // Definir callback que se ejecuta en cada frame procesado
+  faceMesh.onResults(dibujarResultados);
+
+  // Solicitar acceso a la cámara frontal del celular
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: 'user',   // Cámara frontal (selfie)
+        width:  { ideal: 640 },
+        height: { ideal: 480 }
+      },
+      audio: false
+    });
+  } catch (err) {
+    loadingScreen.innerHTML = `
+      <p style="color:#ef4444; text-align:center; padding:20px;">
+        ❌ Error al acceder a la cámara:<br>${err.message}<br><br>
+        <small>Asegúrate de abrir esta página con HTTPS o localhost</small>
+      </p>`;
+    return;
+  }
+
+  // Asignar el stream al elemento video
+  videoEl.srcObject = stream;
+  await videoEl.play();
+
+  // Ajustar canvas al tamaño real del video
+  videoEl.addEventListener('loadedmetadata', () => {
+    canvasEl.width  = videoEl.videoWidth;
+    canvasEl.height = videoEl.videoHeight;
+  });
+
+  // Usar Camera de MediaPipe para procesar frames continuamente
+  // (Alternativa a requestAnimationFrame manual)
+  const camera = new Camera(videoEl, {
+    onFrame: async () => {
+      await faceMesh.send({ image: videoEl });
+    },
+    width:  640,
+    height: 480
+  });
+
+  await camera.start();
+
+  // Ocultar pantalla de carga
+  loadingScreen.style.display = 'none';
+  valFocal.textContent = Math.round(FOCAL_LENGTH_PX) + ' px';
+  registrarLog('MediaPipe Face Mesh listo', 'verde-txt');
+  registrarLog('Calibra el focal length para mayor precisión', 'amarillo-txt');
+}
+
+// Lanzar al cargar la página
+window.addEventListener('load', inicializar);
+</script>
+</body>
+</html>
